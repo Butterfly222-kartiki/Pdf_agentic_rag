@@ -1,355 +1,329 @@
-# Agentic RAG — Intelligent PDF Question Answering
+# Agentic RAG over PDFs
 
-**A CPU-efficient, evidence-grounded Agentic Retrieval-Augmented Generation system for intelligent PDF understanding, adaptive retrieval, and verified answer generation.**
+### Intelligent PDF Understanding with Adaptive Hybrid Retrieval and Evidence-Grounded Answer Generation
 
-<p align="center">
-  <b>Local LLMs · Hybrid Search · Adaptive Retrieval · Citation Verification · CPU-Only</b>
-</p>
+An Agentic Retrieval-Augmented Generation (RAG) system that transforms PDF documents into searchable knowledge and answers complex questions using local LLMs, hybrid retrieval, adaptive query planning, and page-level citation verification.
+
+Built with **Qwen3, FAISS, BM25S, multilingual-e5-small, PyMuPDF, PP-OCRv6, Docling, and llama.cpp.**
 
 ---
 
 ## Overview
 
-Agentic RAG is a document intelligence system that transforms PDF documents into a searchable knowledge base and answers complex questions using adaptive retrieval and evidence-based reasoning.
+Traditional RAG systems typically follow a fixed retrieval and generation process. This project introduces an agent-controlled retrieval workflow that dynamically selects retrieval strategies based on the user's question.
 
-Unlike conventional RAG systems that follow a fixed retrieve-and-generate process, this system uses a bounded agent controller to evaluate retrieval quality, rewrite queries, retry unsuccessful searches, verify generated claims, and abstain when sufficient evidence is unavailable.
+The system can:
+- Understand and classify user queries.
+- Rewrite vague questions.
+- Decompose complex questions into multiple queries.
+- Apply page, section, and block-type metadata filters.
+- Combine semantic and keyword-based retrieval.
+- Rerank retrieved passages.
+- Evaluate whether the retrieved evidence is sufficient.
+- Perform one additional retrieval attempt when evidence is insufficient.
+- Generate answers grounded in document content.
+- Verify page-level citations against retrieved evidence.
 
-The entire pipeline is designed to run locally on CPU without requiring a GPU or paid API services.
+The system uses Qwen3 locally through llama.cpp, with an optional Groq backend.
 
-## Key Features
-
-- **Robust PDF Ingestion:** File validation, SHA-256 deduplication, crash recovery, and resumable processing.
-- **Intelligent Document Processing:** Text extraction, optional OCR, reading-order recovery, heading detection, and table extraction.
-- **Structure-Aware Chunking:** Parent-child chunking with section hierarchy and page-level provenance.
-- **Hybrid Retrieval:** Combines BM25 keyword search and dense vector similarity.
-- **Reciprocal Rank Fusion:** Combines retrieval rankings without requiring score calibration.
-- **Adaptive Query Processing:** Intent classification, multi-part decomposition, metadata filtering, query rewriting, and bounded retries.
-- **Evidence-Grounded Generation:** Generates answers using retrieved document evidence.
-- **Citation Verification:** Validates citation existence and claim-to-evidence support.
-- **Answer Relevance Evaluation:** Checks whether the generated answer actually addresses the original question.
-- **Safe Abstention:** Avoids answering when sufficient evidence cannot be established.
-- **Persistent Storage:** SQLite-based document, keyword, vector, and trace storage.
-- **Evaluation Framework:** Retrieval metrics, answer quality, citation precision, latency, and memory measurements.
-
-## System Architecture
-
-The system consists of two major pipelines connected through a persistent knowledge base.
+## Architecture
 
 ### 1. Document Ingestion Pipeline
 
-PDF documents pass through validation, extraction, structural analysis, chunking, and embedding generation before being stored in searchable indexes.
+The ingestion pipeline uses multiple extraction strategies to handle different PDF formats and preserve document structure.
 
 ```mermaid
 flowchart TD
-    A["PDF Upload"] --> B["Validation and Deduplication"]
-    B --> C["Text Extraction / OCR"]
-    C --> D["Structure and Layout Analysis"]
-    D --> E["Parent-Child Chunking"]
-    E --> F["Embedding Generation"]
-    F --> G["Persistent Storage"]
-    G --> H["BM25 / FTS5 Index"]
-    G --> I["Vector Index"]
+    A["PDF Upload"] --> B["PyMuPDF Native Text Extraction"]
+    B --> C{"Text Usable?"}
+
+    C -->|Yes| D["Extracted Page Content"]
+    C -->|No| E["PP-OCRv6 Small"]
+    E --> F{"OCR Confidence Adequate?"}
+    F -->|No| G["PP-OCRv6 Medium"]
+    F -->|Yes| D
+    G --> D
+
+    D --> H["Docling Layout Analysis"]
+    H --> I["Headings, Tables, Figures and Reading Order"]
+    I --> J["Page-Level Parent Chunks"]
+    J --> K["Child Chunk Generation"]
+    K --> L["Generate Embeddings"]
+    L --> M["Prepare Search Indexes"]
 ```
 
-### 2. Agentic Retrieval Pipeline
+**Document processing technologies:**
 
-User queries are planned and processed through hybrid retrieval. The controller evaluates evidence coverage and initiates bounded query rewriting when retrieval is insufficient.
+| Component | Technology | Purpose |
+|---|---|---|
+| Native extraction | PyMuPDF | Extract digital PDF text |
+| OCR | PP-OCRv6 Small | Recover text from scanned pages |
+| OCR fallback | PP-OCRv6 Medium | Improve extraction when needed |
+| Layout analysis | Docling | Detect headings, tables, figures and reading order |
+| Chunking | Custom parent-child chunking | Preserve context and improve retrieval |
+| Embeddings | multilingual-e5-small | Semantic document representation |
+
+### 2. Parent-Child Chunking
+
+The system uses a hierarchical chunking strategy.
+
+| Chunk type | Approximate size | Purpose |
+|---|---:|---|
+| Parent chunk | 1,500 characters | Preserves broader section context |
+| Child chunk | 450 characters | Enables precise retrieval |
+
+Key characteristics:
+- Parent chunks are split at heading boundaries.
+- Child chunks are sentence-aligned.
+- Parents never cross page boundaries.
+- Tables are split row-wise.
+- Table headers are repeated in each table chunk.
+- Page-level metadata is retained for citation generation.
+
+When a child chunk is retrieved, its corresponding parent provides additional context to the LLM.
+
+### 3. Hybrid Retrieval Engine
+
+The retrieval engine combines dense semantic search and sparse keyword search.
 
 ```mermaid
 flowchart TD
-    A["User Query"] --> B["Query Planning"]
-    B --> C["Hybrid Retrieval"]
-    C --> D["Reciprocal Rank Fusion"]
-    D --> E["Reranking (Optional)"]
-    E --> F["Evidence Evaluation"]
-    F --> G{"Sufficient Evidence?"}
-    G -->|No| H["Query Rewriting and Retry"]
-    H --> C
-    G -->|Yes| I["Context Construction"]
-    I --> J["Local LLM Generation"]
-    J --> K["Citation and Claim Verification"]
-    K --> L["Answer Relevance Check"]
-    L --> M["Verified Answer"]
-    L --> N["Repair / Abstention"]
+    A["Query"] --> B["Metadata Filtering"]
+    B --> C["Dense Retrieval - FAISS"]
+    B --> D["Sparse Retrieval - BM25S"]
+    C --> E["Reciprocal Rank Fusion"]
+    D --> E
+    E --> F["Cross-Encoder Reranking"]
+    F --> G["Ranked Evidence"]
 ```
+
+**Retrieval components:**
+
+| Component | Technology | Function |
+|---|---|---|
+| Dense retrieval | FAISS | Semantic similarity search |
+| Embeddings | multilingual-e5-small | Query and document embeddings |
+| Sparse retrieval | BM25S | Keyword-based retrieval |
+| Metadata filtering | Custom filters | Restrict pages, sections and block types |
+| Rank fusion | Reciprocal Rank Fusion | Combine dense and sparse rankings |
+| Reranking | MiniLM Cross-Encoder | Improve candidate ordering |
+
+Supported metadata filters include:
+- Specific page numbers.
+- Page ranges.
+- Section-name matching.
+- Block types, such as tables.
+
+### 4. Agentic Retrieval and Answer Generation
+
+The agent controller uses Qwen3 with specialized prompts for planning, evidence evaluation and answer generation.
+
+```mermaid
+flowchart TD
+    A["User Question"] --> B["Qwen3 Agent Controller"]
+    B --> C{"Retrieval Strategy"}
+
+    C --> D["Direct Search"]
+    C --> E["Query Rewrite"]
+    C --> F["Multi-Query Search"]
+    C --> G["Metadata Filtering"]
+
+    D --> H["Hybrid Retrieval"]
+    E --> H
+    F --> H
+    G --> H
+
+    H --> I["FAISS + BM25S"]
+    I --> J["RRF Fusion"]
+    J --> K["Cross-Encoder Reranking"]
+    K --> L["Evidence Sufficiency Checker"]
+
+    L --> M{"Enough Evidence?"}
+
+    M -->|Yes| N["Grounded Answer Generation"]
+    M -->|No| O["One Additional Retrieval Attempt"]
+
+    O --> H
+
+    N --> P["Citation Verification"]
+    P --> Q["Final Answer with Page Citations"]
+```
+
+**Controller capabilities:**
+
+| Strategy | Purpose |
+|---|---|
+| Direct | Retrieve information for straightforward questions |
+| Rewrite | Improve vague or poorly formulated queries |
+| Multi-query | Decompose comparisons and multi-part questions |
+| Metadata filter | Restrict retrieval to specified pages or sections |
+
+The controller and evidence checker return structured JSON. Their outputs are validated before being used by the retrieval pipeline.
+
+The system allows one additional retrieval attempt when the initial evidence is insufficient.
+
+### 5. Evidence Verification
+
+The answer generator uses only retrieved document evidence.
+
+Generated answers contain page-level citations in the `[p.N]` format.
+
+The system checks:
+- Whether cited evidence exists.
+- Whether cited pages correspond to retrieved passages.
+- Whether generated claims are supported by the evidence.
+- Whether the answer remains grounded in the source document.
+
+Unsupported or insufficiently grounded answers are not treated as verified responses.
+
+---
 
 ## Technology Stack
 
-| Component | Technology |
+| Layer | Technology |
 |---|---|
-| Programming Language | Python |
-| PDF Processing | PyMuPDF |
-| OCR | Tesseract (Optional) |
-| Numerical Computing | NumPy |
-| Keyword Retrieval | SQLite FTS5 / BM25 |
-| Embeddings | BGE-small / Hashing Embedder |
-| Vector Storage | SQLite BLOB + NumPy |
-| Rank Fusion | Reciprocal Rank Fusion |
-| Reranking | Cross-Encoder (Optional) |
-| Local LLM | Ollama / llama.cpp |
-| Extractive Fallback | Custom Extractive Generator |
-| Database | SQLite |
-| API | FastAPI |
-| Monitoring | JSON Logging, psutil |
-
-## Agentic Capabilities
-
-The system uses a bounded state-machine controller rather than a fixed retrieval pipeline.
-
-| Capability | Description |
-|---|---|
-| Query Planning | Understands query intent and decomposes multi-part questions. |
-| Adaptive Retrieval | Evaluates whether retrieved evidence sufficiently covers the question. |
-| Query Rewriting | Rewrites queries and relaxes filters when retrieval fails. |
-| Bounded Execution | Limits retries, processing time, and context size. |
-| Evidence Verification | Checks whether generated claims are supported by cited evidence. |
-| Citation Repair | Attempts to associate unsupported citations with suitable evidence. |
-| Answer Relevance | Evaluates question-to-answer relevance. |
-| Abstention | Refuses to produce unsupported answers. |
-
-## Robustness and Reliability
-
-The architecture incorporates safeguards across the complete document lifecycle.
-
-**Document-level protection**
-- PDF signature and size validation.
-- Encryption and page-count checks.
-- SHA-256 duplicate detection.
-- Atomic file storage.
-- Resumable ingestion and crash recovery.
-- Versioned indexes and automatic migration.
-- Suspicious prompt-injection-like sentences quarantined before indexing.
-
-**Retrieval-level protection**
-- Hybrid keyword and semantic search.
-- Parent-context expansion.
-- Evidence coverage evaluation.
-- Bounded retrieval retries.
-- Time and context budgets.
-
-**Answer-level protection**
-- Citation existence checks.
-- Claim-to-evidence support verification.
-- Numeric consistency checks, including supported derived numbers.
-- Contradiction checks using negation.
-- Citation repair and answer relevance evaluation.
-- Abstention when evidence is insufficient.
+| Runtime | Google Colab |
+| Language | Python |
+| Local LLM | Qwen3-4B-Instruct |
+| LLM inference | llama.cpp |
+| Optional hosted inference | Groq |
+| PDF extraction | PyMuPDF |
+| OCR | PP-OCRv6 |
+| Layout processing | Docling |
+| Embedding model | multilingual-e5-small |
+| Dense index | FAISS |
+| Sparse retrieval | BM25S |
+| Reranking | MiniLM Cross-Encoder |
+| Rank fusion | Reciprocal Rank Fusion |
+| Storage | Google Drive / JSONL artifacts |
 
 ## Getting Started
 
 ### Requirements
 
-- Python 3.10 or newer.
-- A CPU-based machine.
-- No GPU required.
-- Internet access only for optional model downloads and package installation.
+- Google Colab.
+- Recommended: T4 GPU runtime.
+- Google Drive for model caching and artifacts.
+- Hugging Face token for model downloads.
+- Python dependencies installed through the notebook.
 
-### Installation
+CPU execution is possible, but local Qwen3-4B inference may be considerably slower.
 
-Clone the repository:
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
 cd YOUR_REPOSITORY
 ```
 
-Install the core dependencies:
+### 2. Open the notebook
 
-```bash
-pip install pymupdf numpy pandas pydantic psutil fastapi uvicorn python-multipart httpx
-```
+Open:
 
-### Run the Notebook
+`Agentic_RAG_Pipeline_(2).ipynb`
 
-Open the notebook:
+Upload it to Google Colab or open it from your GitHub repository.
 
-```text
-Local_Agentic_RAG_CPU_v2.ipynb
-```
+### 3. Configure credentials
 
-Run the cells sequentially.
+Add `HF_TOKEN` through Google Colab Secrets and enable notebook access.
 
-The default configuration uses:
-- Hashing-based embeddings.
-- Extractive answer generation.
-- SQLite persistent storage.
-- CPU-only processing.
+A `GROQ_API_KEY` is required only if you choose the optional Groq backend.
 
-This configuration allows the complete pipeline to be tested without downloading an embedding model or LLM.
+### 4. Configure the PDF
 
-### Enable Real CPU Models
-
-Set:
+Set the PDF path in the configuration cell:
 
 ```python
-INSTALL_OPTIONAL = True
+PDF_PATH = "/content/my_document.pdf"
 ```
 
-Run the optional installation cell.
+### 5. Run the notebook
 
-**Embedding model**
+Execute the cells sequentially.
 
-The system supports:
+The notebook handles:
+- PDF extraction and OCR.
+- Document layout analysis.
+- Chunk generation.
+- Embedding generation.
+- FAISS and BM25S indexing.
+- Agentic retrieval.
+- Evidence verification.
+- Answer generation.
 
-```text
-BAAI/bge-small-en-v1.5
-```
+## Generated Artifacts
 
-**LLM Option 1: Ollama**
+The ingestion pipeline produces structured JSONL outputs:
 
-Install Ollama and download a model:
-
-```bash
-ollama pull qwen2.5:3b
-```
-
-The notebook can automatically detect the local Ollama service.
-
-**LLM Option 2: llama.cpp**
-
-The notebook supports quantized GGUF models through llama.cpp.
-
-Example configuration:
-
-```python
-Config(
-    llm_backend="llamacpp",
-    gguf_repo="Qwen/Qwen2.5-3B-Instruct-GGUF",
-    gguf_file="qwen2.5-3b-instruct-q4_k_m.gguf"
-)
-```
-
-All optional models run on CPU with GPU layers disabled.
-
-## Configuration
-
-The system exposes a centralized configuration class.
-
-Important parameters include:
-
-| Parameter | Default | Purpose |
-|---|---:|---|
-| `max_pdf_mb` | 50 | Maximum PDF size |
-| `max_pages` | 600 | Maximum pages per PDF |
-| `parent_chars` | 2400 | Parent chunk size |
-| `child_chars` | 600 | Child chunk size |
-| `top_k_dense` | 20 | Dense retrieval candidates |
-| `top_k_bm25` | 20 | BM25 retrieval candidates |
-| `final_k` | 6 | Final retrieval candidates |
-| `max_retries` | 2 | Additional retrieval attempts |
-| `min_coverage` | 0.55 | Minimum evidence coverage |
-| `context_char_budget` | 6000 | Maximum evidence context |
-| `support_threshold` | 0.60 | Claim support threshold |
-
-Configuration can be customized without changing the underlying pipeline.
-
-## Evaluation and Benchmarking
-
-The notebook includes a golden-set evaluation framework to measure retrieval quality, answer reliability, resource consumption, and system stability.
-
-### Evaluation Metrics
-
-| Metric | Purpose |
+| File | Purpose |
 |---|---|
-| Recall@K | Measures retrieval effectiveness. |
-| MRR | Measures ranking quality. |
-| Answer Correctness | Measures generated answer accuracy against expected facts. |
-| Answer Precision | Measures relevance of generated claims. |
-| Citation Precision | Measures whether citations support the expected facts. |
-| Faithfulness | Measures the share of generated claims passing verification. |
-| Abstention Recall | Measures correct refusal of unanswerable questions. |
-| Multi-Document Attribution | Checks whether answers cite the correct documents. |
-| Multi-Turn Accuracy | Tests follow-up question handling. |
-| Latency p50/p95 | Measures response-time distribution. |
-| Peak RSS | Measures memory consumption. |
+| `page_records.jsonl` | Extracted page-level content |
+| `child_chunks.jsonl` | Searchable child chunks |
+| `ocr_page_diagnostics.jsonl` | OCR processing diagnostics |
 
-### Test Coverage
+The artifacts retain page-level information to support retrieval and citation generation.
 
-The evaluation framework includes:
-- Factual questions.
-- Numerical and table-based questions.
-- Multi-part questions.
-- Negation and contradiction cases.
-- Page-filtered questions.
-- Near-miss and unanswerable questions.
-- Multi-document retrieval.
-- Multi-turn conversations.
+## Evaluation
 
-The default v2 golden set contains 39 questions: 30 answerable and 9 unanswerable.
+The project includes a question-answering evaluation workflow.
 
-**Important:** The default benchmark uses a locally generated demonstration corpus and the zero-download hashing embedder with extractive generation. Results on other documents and real models must be measured separately.
+Evaluation covers:
+- Direct factual questions.
+- Vague questions requiring rewriting.
+- Multi-query and comparison questions.
+- Page-specific questions.
+- Table-related questions.
+- Answer correctness against reference answers.
+- Optional LLM-based answer judging.
 
-## FastAPI Service
+The evaluation workflow also supports manually supplied PDF and JSON benchmark files.
 
-An optional FastAPI interface exposes the RAG functionality.
+## Robustness Features
 
-| Method | Endpoint | Function |
-|---|---|---|
-| POST | `/documents` | Upload and ingest a PDF |
-| GET | `/documents` | List documents |
-| DELETE | `/documents/{id}` | Delete a document |
-| POST | `/ask` | Ask questions |
-| GET | `/health` | Check service health |
-| GET | `/stats` | View system statistics |
+**Document robustness**
+- Native extraction with conditional OCR fallback.
+- Escalation from PP-OCRv6 Small to Medium.
+- Layout-aware extraction.
+- Page-level chunk boundaries.
+- Table-aware chunking.
 
-The service uses the `X-Owner` header for document isolation.
+**Retrieval robustness**
+- Dense and sparse retrieval.
+- Metadata filtering within retrieval.
+- Reciprocal Rank Fusion.
+- Cross-encoder reranking.
+- Adaptive query strategies.
+- One additional retrieval attempt.
 
-**Security note:** Replace the example owner-header mechanism with proper authentication, such as JWT or API keys, before exposing the service publicly.
+**Generation reliability**
+- Structured controller outputs.
+- Validated retrieval plans.
+- Evidence sufficiency checking.
+- Grounded answer generation.
+- Page-level citation verification.
 
-## Storage and Observability
+## Limitations
 
-Persistent data is stored in the configured data directory.
-
-```text
-rag_data/
-├── pdfs/
-├── logs/
-│   └── app.jsonl
-├── eval/
-├── backups/
-├── models/
-└── rag.sqlite3
-```
-
-The system supports:
-- Structured JSON logs.
-- Retrieval and generation traces.
-- Processing status tracking.
-- Performance monitoring.
-- SQLite backup and restore.
-- Automatic recovery of interrupted ingestion jobs.
-
-## Project Scope and Limitations
-
-- The default hashing embedder is suitable for smoke testing but provides weaker semantic retrieval than a trained embedding model.
-- CPU inference speed depends on the selected model and hardware.
-- OCR requires the optional Tesseract installation.
-- Cross-encoder reranking is optional because it adds CPU overhead.
-- Evidence verification uses heuristic checks and cannot guarantee factual correctness.
-- Benchmark results on synthetic documents do not guarantee performance on arbitrary real-world PDFs.
+- Qwen3-4B local inference can be slow on CPU.
+- OCR and layout processing increase ingestion time.
+- Cross-encoder reranking adds computational overhead.
+- Evidence verification reduces unsupported answers but does not guarantee factual correctness.
+- The additional retrieval attempt is bounded to one retry.
 
 ## Future Improvements
 
-- Advanced table and multimodal document understanding.
-- Better semantic and cross-document reasoning.
-- Additional retrieval strategies.
-- Improved evaluation on large real-world PDF collections.
-- Optimized inference for low-resource environments.
-- Expanded document formats and ingestion connectors.
-
-## Contributing
-
-Contributions, bug reports, and suggestions are welcome.
-
-1. Fork the repository.
-2. Create a feature branch.
-3. Implement and test your changes.
-4. Submit a pull request with a clear description.
+- More efficient local inference.
+- Improved multilingual document understanding.
+- Advanced table and figure retrieval.
+- Larger-scale document collections.
+- More comprehensive retrieval and citation benchmarks.
+- Multi-document reasoning and cross-document evidence synthesis.
 
 ## License
 
-Choose and add an appropriate open-source license before publishing.
+Add an appropriate open-source license before public distribution.
 
 ---
 
-**Built with Python, local models, hybrid retrieval, and evidence-grounded AI.**
+**Agentic RAG over PDFs — From document ingestion to evidence-grounded answers.**
